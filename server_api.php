@@ -189,6 +189,8 @@ try {
 
             // Get JSON input
             $jsonInput = file_get_contents('php://input');
+            api_log("Received user-sync request with data: " . $jsonInput, "DEBUG");
+            
             $requestData = json_decode($jsonInput, true);
 
             if (json_last_error() !== JSON_ERROR_NONE) {
@@ -196,9 +198,28 @@ try {
                 send_response(false, 'Invalid JSON input', 400);
             }
 
+            // Verify required fields for debugging
+            if (!isset($requestData['action']) || !isset($requestData['user'])) {
+                api_log("Missing required fields in user-sync request", "ERROR");
+                send_response(false, 'Missing required fields: action and user', 400);
+            }
+            
+            if (!isset($requestData['user']['id']) || !isset($requestData['user']['email'])) {
+                api_log("Missing required user fields in user-sync request", "ERROR");
+                send_response(false, 'Missing required user fields: id and email', 400);
+            }
+
             // Use the user_sync.php script to process the request
             require_once __DIR__ . '/user_sync.php';
-            $result = process_user_sync($requestData);
+            
+            // Capture PHP errors that might occur during processing
+            try {
+                $result = process_user_sync($requestData);
+                api_log("User sync result: " . json_encode($result), "DEBUG");
+            } catch (Exception $e) {
+                api_log("Exception during user sync: " . $e->getMessage(), "ERROR");
+                send_response(false, 'Error during user sync: ' . $e->getMessage(), 500);
+            }
 
             send_response(
                 $result['success'],

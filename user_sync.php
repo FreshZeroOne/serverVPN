@@ -31,11 +31,49 @@ if (!is_dir(USER_DB_DIR)) {
     mkdir(USER_DB_DIR, 0755, true);
 }
 
-// Function to log synchronization events
+// Function to log synchronization events with enhanced error handling
 function sync_log($message, $level = 'INFO') {
+    // Always ensure we have a minimal fallback
+    $fallbackLog = __DIR__ . '/debug_sync_' . date('Ymd') . '.log';
+    
     $timestamp = date('Y-m-d H:i:s');
     $logMessage = "[$timestamp] [$level] $message\n";
-    file_put_contents(USER_SYNC_LOG, $logMessage, FILE_APPEND);
+    
+    // Directly output to PHP error log to ensure it's captured
+    error_log("SHRAKVPN_SYNC: $logMessage");
+    
+    // Try to write to our primary log directory
+    try {
+        // Make sure log directory exists
+        $logDir = __DIR__ . '/logs';
+        if (!is_dir($logDir)) {
+            if (!@mkdir($logDir, 0777, true)) {
+                error_log("Failed to create log directory: $logDir");
+                // Try writing to fallback
+                @file_put_contents($fallbackLog, "[$timestamp] [ERROR] Failed to create log directory: $logDir\n", FILE_APPEND);
+            } else {
+                // Successfully created directory, try to set max permissions
+                @chmod($logDir, 0777);
+            }
+        }
+        
+        $logFile = $logDir . '/user_sync.log';
+        
+        // Try to ensure the log file is writable
+        if (file_exists($logFile) && !is_writable($logFile)) {
+            @chmod($logFile, 0666);
+        }
+        
+        if (@file_put_contents($logFile, $logMessage, FILE_APPEND) === false) {
+            // Failed, write to fallback
+            @file_put_contents($fallbackLog, "[$timestamp] [ERROR] Failed to write to $logFile\n", FILE_APPEND);
+            @file_put_contents($fallbackLog, $logMessage, FILE_APPEND);
+        }
+    } catch (Exception $e) {
+        // Catch any exceptions to prevent script termination
+        @file_put_contents($fallbackLog, "[$timestamp] [ERROR] Exception in logging: " . $e->getMessage() . "\n", FILE_APPEND);
+        @file_put_contents($fallbackLog, $logMessage, FILE_APPEND);
+    }
 }
 
 /**
@@ -156,8 +194,18 @@ function configure_wireguard_user($userData, $config) {
         ];
     }
 
-    // Determine interface
+    // Determine interface and configuration paths
     $wgInterface = $config['wireguard_interface'] ?? 'wg0';
+    $configPath = "/etc/wireguard/$wgInterface.conf";
+    
+    // Absolute path for interface
+    $absConfigPath = realpath($configPath);
+    if ($absConfigPath) {
+        $configPath = $absConfigPath;
+        sync_log("Using absolute config path: $configPath", "INFO");
+    } else {
+        sync_log("Warning: Could not resolve absolute path for $configPath, using as is", "WARNING");
+    }
 
     // Log the interface being used
     sync_log("Using WireGuard interface: $wgInterface for user $userId", "INFO");
@@ -182,90 +230,210 @@ function configure_wireguard_user($userData, $config) {
             ];
         }
 
-        // Check if WireGuard tools are available
-        $wgCheck = shell_exec("which wg 2>&1");
-        if (empty($wgCheck) || strpos($wgCheck, 'no wg in') !== false) {
-            sync_log("WireGuard tools not installed", "ERROR");
+        // Check if the file exists and is readable - with detailed diagnostics
+        sync_log("Checking config file: $configPath", "DEBUG");
+        if (!file_exists($configPath)) {
+            sync_log("File check by file_exists: DOES NOT EXIST", "ERROR");
+            
+            // Try with is_file for additional check
+            if (!is_file($configPath)) {
+                sync_log("File check by is_file: DOES NOT EXIST", "ERROR");
+            } else {
+                sync_log("File check by is_file: EXISTS", "WARNING"); // This would be unusual
+            }
+            
+            // Try direct shell check
+            $fileCheck = shell_exec("[ -f $configPath ] && echo 'exists' || echo 'does not exist'");
+            sync_log("Shell file check: $fileCheck", "DEBUG");
+            
+            // Directory check
+            $dirPath = dirname($configPath);
+            $dirCheck = shell_exec("[ -d $dirPath ] && echo 'exists' || echo 'does not exist'");
+            sync_log("Directory check for $dirPath: $dirCheck", "DEBUG");
+            
+            // List directory contents
+            $lsOutput = shell_exec("ls -la $dirPath 2>&1");
+            sync_log("Directory contents of $dirPath: $lsOutput", "DEBUG");
+            
             return [
                 'success' => false,
-                'message' => "WireGuard tools not installed on the server",
+                'message' => "WireGuard config file not found",
+                'ip' => $assignedIp
+            ];
+        }
+        
+        // File exists, now check permissions
+        if (!is_readable($configPath)) {
+            sync_log("Config file exists but is not readable!", "ERROR");
+            $perms = fileperms($configPath);
+            $octal = substr(sprintf('%o', $perms), -4);
+            $owner = posix_getpwuid(fileowner($configPath))['name'] ?? 'unknown';
+            $group = posix_getgrgid(filegroup($configPath))['name'] ?? 'unknown';
+            sync_log("File permissions: $octal, Owner: $owner, Group: $group", "DEBUG");
+            
+            // Try to fix permissions
+            sync_log("Attempting to fix permissions with shell commands", "INFO");
+            shell_exec("sudo chmod 644 $configPath 2>&1");
+            
+            // Verify fix
+            if (!is_readable($configPath)) {
+                sync_log("Still cannot read file after permission fix", "ERROR");
+                return [
+                    'success' => false,
+                    'message' => "Config file is not readable",
+                    'ip' => $assignedIp
+                ];
+            } else {
+                sync_log("Successfully fixed file permissions", "INFO");
+            }
+        }
+
+        // Now try to read the file with multiple methods
+        $configContent = @file_get_contents($configPath);
+        if ($configContent === false) {
+            sync_log("Failed to read config file with file_get_contents", "ERROR");
+            
+            // Try with shell command
+            $catOutput = shell_exec("cat $configPath 2>&1");
+            if (!empty($catOutput)) {
+                sync_log("Successfully read config file with shell command", "INFO");
+                $configContent = $catOutput;
+            } else {
+                sync_log("Failed to read config file with shell command too", "ERROR");
+                return [
+                    'success' => false,
+                    'message' => "Failed to read config file content",
+                    'ip' => $assignedIp
+                ];
+            }
+        }
+        
+        sync_log("Retrieved current config content of length: " . strlen($configContent), "DEBUG");
+        
+        // Prüfen, ob der Public Key bereits in der Konfiguration vorhanden ist
+        $peerExists = strpos($configContent, $publicKey) !== false;
+        sync_log("Peer already exists in config: " . ($peerExists ? "Yes" : "No"), "DEBUG");
+
+        if (!$peerExists) {
+            // Neuen Peer-Abschnitt hinzufügen
+            $peerConfig = "\n[Peer]\nPublicKey = $publicKey\nAllowedIPs = $assignedIp\nPersistentKeepalive = 25\n";
+            
+            $newConfig = $configContent . $peerConfig;
+            
+            // Schreiben Sie die neue Konfiguration in die Datei
+            sync_log("Writing new config with peer to $configPath", "INFO");
+            
+            // First check if file is writable
+            if (!is_writable($configPath)) {
+                sync_log("Config file is not writable!", "ERROR");
+                
+                // Try to use sudo to write the file
+                sync_log("Attempting to write file with sudo", "INFO");
+                $tmpFile = tempnam(sys_get_temp_dir(), 'wg_');
+                file_put_contents($tmpFile, $newConfig);
+                
+                exec("sudo cp $tmpFile $configPath 2>&1", $cpOutput, $cpReturn);
+                if ($cpReturn !== 0) {
+                    sync_log("Failed to copy file with sudo: " . implode("\n", $cpOutput), "ERROR");
+                    unlink($tmpFile);
+                    return [
+                        'success' => false,
+                        'message' => "Failed to write to config file",
+                        'ip' => $assignedIp
+                    ];
+                }
+                
+                unlink($tmpFile);
+                sync_log("Successfully wrote config file with sudo", "INFO");
+            } else {
+                // File is writable, use direct method
+                if (file_put_contents($configPath, $newConfig) === false) {
+                    sync_log("Failed to write config file with file_put_contents!", "ERROR");
+                    return [
+                        'success' => false,
+                        'message' => "Failed to write to config file",
+                        'ip' => $assignedIp
+                    ];
+                }
+                
+                sync_log("Successfully wrote config file with file_put_contents", "INFO");
+            }
+            
+            sync_log("Config file updated successfully", "INFO");
+            
+            // Versuche auch die laufende Konfiguration zu aktualisieren
+            $addCmd = "sudo wg set $wgInterface peer $publicKey allowed-ips $assignedIp persistent-keepalive 25";
+            sync_log("Running command: $addCmd", "DEBUG");
+            exec($addCmd . " 2>&1", $output, $returnCode);
+            
+            if ($returnCode !== 0) {
+                sync_log("Warning: Could not update runtime config with sudo wg set: " . implode("\n", $output), "WARNING");
+                
+                // Try wg directly without sudo
+                $wgCmd = "wg set $wgInterface peer $publicKey allowed-ips $assignedIp persistent-keepalive 25";
+                sync_log("Trying without sudo: $wgCmd", "INFO");
+                exec($wgCmd . " 2>&1", $output2, $returnCode2);
+                
+                if ($returnCode2 !== 0) {
+                    sync_log("Warning: Direct wg command also failed: " . implode("\n", $output2), "WARNING");
+                    
+                    // Try syncconf
+                    $syncCmd = "sudo wg syncconf $wgInterface $configPath";
+                    sync_log("Trying sudo wg syncconf: $syncCmd", "INFO");
+                    exec($syncCmd . " 2>&1", $syncOutput, $syncCode);
+                    
+                    if ($syncCode !== 0) {
+                        sync_log("Warning: sudo wg syncconf also failed: " . implode("\n", $syncOutput), "WARNING");
+                        
+                        // Last resort - restart service
+                        sync_log("Attempting to restart WireGuard service", "WARNING");
+                        exec("sudo systemctl restart wg-quick@$wgInterface 2>&1", $restartOutput, $restartCode);
+                        
+                        if ($restartCode !== 0) {
+                            sync_log("Warning: Service restart failed: " . implode("\n", $restartOutput), "WARNING");
+                        } else {
+                            sync_log("Successfully restarted WireGuard service", "INFO");
+                        }
+                    } else {
+                        sync_log("Successfully applied config with sudo wg syncconf", "INFO");
+                    }
+                } else {
+                    sync_log("Successfully updated runtime config with direct wg set", "INFO");
+                }
+            } else {
+                sync_log("Successfully updated runtime config with sudo wg set", "INFO");
+            }
+        } else {
+            sync_log("Peer already exists in config, no changes needed", "INFO");
+        }
+
+        // Verifiziere die Konfiguration
+        $verifyConfig = file_get_contents($configPath);
+        if ($verifyConfig === false) {
+            $verifyConfig = shell_exec("cat $configPath 2>&1");
+        }
+        
+        if (strpos($verifyConfig, $publicKey) === false) {
+            sync_log("ERROR: Peer not found in config file after update!", "ERROR");
+            return [
+                'success' => false,
+                'message' => "Failed to add peer to configuration file",
                 'ip' => $assignedIp
             ];
         }
 
-        // Check if peer already exists
-        $peerListCmd = "wg show $wgInterface peers";
-        sync_log("Running command: $peerListCmd", "DEBUG");
-        $peerList = shell_exec($peerListCmd);
-        sync_log("Peer list result: " . trim($peerList), "DEBUG");
-
-        $existingPeer = strpos($peerList, $publicKey) !== false;
-
-        if ($existingPeer) {
-            // Update existing peer
-            $updateCmd = "wg set $wgInterface peer $publicKey allowed-ips $assignedIp";
-            sync_log("Running command: $updateCmd", "DEBUG");
-            $result = shell_exec($updateCmd . " 2>&1");
-            if (!empty($result)) {
-                sync_log("Command output: $result", "DEBUG");
-            }
-            sync_log("Updated WireGuard peer for user $userId", "INFO");
-        } else {
-            // Add new peer
-            $addCmd = "wg set $wgInterface peer $publicKey allowed-ips $assignedIp persistent-keepalive 25";
-            sync_log("Running command: $addCmd", "DEBUG");
-            $result = shell_exec($addCmd . " 2>&1");
-            if (!empty($result)) {
-                sync_log("Command output: $result", "DEBUG");
-            }
-            sync_log("Added new WireGuard peer for user $userId", "INFO");
-        }
-
-        // Save configuration permanently
-        $saveCmd = "wg-quick save $wgInterface";
-        sync_log("Running command: $saveCmd", "DEBUG");
-        $saveResult = shell_exec($saveCmd . " 2>&1");
-        if (!empty($saveResult)) {
-            sync_log("Save command output: $saveResult", "DEBUG");
-        }
-
-        // Verify the peer was actually added
-        $verifyCmd = "wg show $wgInterface peers | grep -w $publicKey";
-        sync_log("Running verification command: $verifyCmd", "DEBUG");
-        $verifyResult = shell_exec($verifyCmd);
-
-        if (empty($verifyResult)) {
-            sync_log("Verification failed, peer not found after configuration", "WARNING");
-            // Try an alternative way to save the configuration
-            $altSaveCmd = "wg showconf $wgInterface > /etc/wireguard/$wgInterface.conf";
-            sync_log("Trying alternative save method: $altSaveCmd", "INFO");
-            shell_exec($altSaveCmd);
-
-            // Add the peer directly to the config file if needed
-            $configFile = "/etc/wireguard/$wgInterface.conf";
-            if (file_exists($configFile)) {
-                $configContent = file_get_contents($configFile);
-                if (strpos($configContent, $publicKey) === false) {
-                    $peerConfig = "\n[Peer]\nPublicKey = $publicKey\nAllowedIPs = $assignedIp\nPersistentKeepalive = 25\n";
-                    file_put_contents($configFile, $configContent . $peerConfig);
-                    sync_log("Added peer directly to config file", "INFO");
-
-                    // Apply the configuration
-                    shell_exec("wg syncconf $wgInterface /etc/wireguard/$wgInterface.conf");
-                }
-            }
-        }
-
+        // Erfolg zurückgeben
         return [
             'success' => true,
             'message' => 'WireGuard configuration updated successfully',
             'ip' => $assignedIp
         ];
+
     } catch (Exception $e) {
-        sync_log("Failed to configure WireGuard for user $userId: " . $e->getMessage(), "ERROR");
+        sync_log("Exception during WireGuard config: " . $e->getMessage(), "ERROR");
         return [
             'success' => false,
-            'message' => 'Failed to configure WireGuard: ' . $e->getMessage(),
+            'message' => 'Exception during configuration: ' . $e->getMessage(),
             'ip' => $assignedIp
         ];
     }

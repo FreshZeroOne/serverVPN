@@ -249,11 +249,51 @@ EOT;
     run_command("echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-sysctl.conf");
     run_command("sysctl -p /etc/sysctl.d/99-sysctl.conf");
 
+    // Set proper permissions for the WireGuard files
+    log_message("Setting up proper permissions for WireGuard...");
+    
+    // Set WireGuard directory permissions
+    run_command("chown -R root:www-data /etc/wireguard");
+    run_command("chmod 750 /etc/wireguard");
+    
+    // Set config file permissions - make it readable and writable by www-data
+    run_command("chmod 664 /etc/wireguard/wg0.conf");
+    
+    // Set public key file readable by www-data
+    run_command("chmod 644 /etc/wireguard/server_public.key");
+    run_command("chmod 644 /etc/wireguard/public.key");
+    
+    // Keep private key secure
+    run_command("chmod 600 /etc/wireguard/server_private.key");
+    
+    // Create sudo rules for www-data to manage WireGuard
+    log_message("Setting up sudo permissions for www-data user...");
+    $sudoersContent = <<<EOT
+# Allow www-data to manage WireGuard without password
+www-data ALL=(ALL) NOPASSWD: /usr/bin/wg
+www-data ALL=(ALL) NOPASSWD: /usr/bin/wg show
+www-data ALL=(ALL) NOPASSWD: /usr/bin/wg set
+www-data ALL=(ALL) NOPASSWD: /usr/bin/wg syncconf
+www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart wg-quick@*
+EOT;
+    
+    file_put_contents("/etc/sudoers.d/wireguard-www-data", $sudoersContent);
+    run_command("chmod 440 /etc/sudoers.d/wireguard-www-data");
+    
+    // Test the permissions
+    $testResult = run_command("sudo -u www-data cat /etc/wireguard/wg0.conf > /dev/null && echo 'Access OK'");
+    if ($testResult === "Access OK") {
+        log_message("Permission test successful: www-data can access WireGuard configuration", "SUCCESS");
+    } else {
+        log_message("Permission test failed: www-data cannot access WireGuard configuration", "WARNING");
+        log_message("You may need to run the fix_wireguard_permissions.sh script after installation", "WARNING");
+    }
+
     // Enable and start WireGuard
     run_command("systemctl enable wg-quick@wg0");
     run_command("systemctl start wg-quick@wg0");
 
-    log_message("WireGuard VPN setup completed");
+    log_message("WireGuard VPN setup completed with proper permissions");
     log_message("Server public key: $publicKey");
     
     // Save the public key in the configuration
