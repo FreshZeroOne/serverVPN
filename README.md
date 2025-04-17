@@ -1,4 +1,4 @@
-  ```bash
+```bash
 ## Fi
 sudo apt update
 sudo apt upgrade
@@ -6,7 +6,7 @@ sudo apt install php
 sudo git clone serverVPN
 cd serverVPN
 setup.php
----
+  ```
 
 Hier eine **komplette Schritt‑für‑Schritt‑Anleitung**, um auf einem frisch aufgesetzten Ubuntu 24.04 LTS‑Server **wg‑easy** in Docker laufen zu lassen – inkl. WireGuard, Web‑UI und UFW‑Firewall.
 
