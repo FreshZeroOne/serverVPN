@@ -244,6 +244,47 @@ function collect_server_info() {
         }
     }
 
+    // Pi-hole installation
+    echo PHP_EOL . BOLD . MAGENTA . "╔═══ PI-HOLE KONFIGURATION ═══╗" . RESET . PHP_EOL;
+    
+    if ($isUpdate && isset($existingConfig['install_pihole'])) {
+        $serverInfo['install_pihole'] = $existingConfig['install_pihole'];
+        log_message("Verwende bestehende Pi-hole-Einstellung: " . BOLD . ($serverInfo['install_pihole'] ? "Ja" : "Nein") . RESET);
+    } else {
+        $installPihole = prompt("Möchten Sie Pi-hole installieren (Network-wide Ad-Blocker)", "nein", ["ja", "nein"]);
+        $serverInfo['install_pihole'] = ($installPihole === 'ja');
+    }
+    
+    if ($serverInfo['install_pihole']) {
+        if ($isUpdate && isset($existingConfig['pihole_password'])) {
+            $serverInfo['pihole_password'] = $existingConfig['pihole_password'];
+            log_message("Verwende bestehendes Pi-hole-Passwort");
+        } else {
+            $serverInfo['pihole_password'] = prompt("Pi-hole Admin-Passwort eingeben (leer lassen für zufälliges Passwort)");
+            if (empty($serverInfo['pihole_password'])) {
+                $serverInfo['pihole_password'] = substr(str_shuffle(MD5(microtime())), 0, 12);
+                log_message("Zufälliges Pi-hole-Passwort generiert: " . BOLD . $serverInfo['pihole_password'] . RESET);
+            }
+        }
+        
+        if ($isUpdate && isset($existingConfig['pihole_interface'])) {
+            $serverInfo['pihole_interface'] = $existingConfig['pihole_interface'];
+        } else {
+            $serverInfo['pihole_interface'] = prompt("Pi-hole Netzwerk-Interface", "eth0");
+        }
+        
+        if ($isUpdate && isset($existingConfig['pihole_dns1'])) {
+            $serverInfo['pihole_dns1'] = $existingConfig['pihole_dns1'];
+            $serverInfo['pihole_dns2'] = $existingConfig['pihole_dns2'];
+        } else {
+            log_message("Bitte wählen Sie die DNS-Server für Pi-hole:");
+            $serverInfo['pihole_dns1'] = prompt("Primärer DNS-Server", "9.9.9.9");
+            $serverInfo['pihole_dns2'] = prompt("Sekundärer DNS-Server", "149.112.112.112");
+        }
+        
+        log_message("Pi-hole wird während der Installation konfiguriert");
+    }
+
     echo PHP_EOL . BOLD . MAGENTA . "╔═══ DATENBANK KONFIGURATION ═══╗" . RESET . PHP_EOL;
     
     // Database connection info
@@ -286,6 +327,13 @@ function create_config_file($serverInfo) {
         'proxy_port' => $serverInfo['proxy_port'] ?? null,
         'proxy_username' => $serverInfo['proxy_username'] ?? null,
         'proxy_password' => $serverInfo['proxy_password'] ?? null,
+
+        // Pi-hole settings
+        'install_pihole' => $serverInfo['install_pihole'] ?? false,
+        'pihole_password' => $serverInfo['pihole_password'] ?? null,
+        'pihole_interface' => $serverInfo['pihole_interface'] ?? null,
+        'pihole_dns1' => $serverInfo['pihole_dns1'] ?? null,
+        'pihole_dns2' => $serverInfo['pihole_dns2'] ?? null,
 
         // Database connection details
         'db_host' => $serverInfo['db_host'],
@@ -488,6 +536,82 @@ iptables -t nat -A PREROUTING -i wg0 -p tcp -j REDSOCKS
     }
 }
 
+// Install Pi-hole if needed
+function install_pihole($serverInfo) {
+    if (!$serverInfo['install_pihole']) {
+        return;
+    }
+
+    log_message("Beginne mit Pi-hole Installation", 'STEP');
+
+    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+        log_message("Pi-hole wird unter Windows nicht unterstützt.", 'ERROR');
+        log_message("Pi-hole kann nur auf Linux-Systemen installiert werden.", 'ERROR');
+        return;
+    }
+
+    // Create an install script for Pi-hole with automated settings
+    $setupVars = [
+        'PIHOLE_INTERFACE' => $serverInfo['pihole_interface'],
+        'IPV4_ADDRESS' => 'auto',
+        'IPV6_ADDRESS' => 'auto',
+        'PIHOLE_DNS_1' => $serverInfo['pihole_dns1'],
+        'PIHOLE_DNS_2' => $serverInfo['pihole_dns2'],
+        'QUERY_LOGGING' => 'true',
+        'INSTALL_WEB_SERVER' => 'true',
+        'INSTALL_WEB_INTERFACE' => 'true',
+        'LIGHTTPD_ENABLED' => 'true',
+        'BLOCKING_ENABLED' => 'true',
+        'WEBPASSWORD' => hash('sha256', $serverInfo['pihole_password']),
+        'DNSMASQ_LISTENING' => 'single',
+        'PIHOLE_BLOCKING_ENABLED' => 'true'
+    ];
+
+    $setupVarsContent = "";
+    foreach ($setupVars as $key => $value) {
+        $setupVarsContent .= "$key=$value\n";
+    }
+
+    $installScriptContent = "#!/bin/bash
+# Pi-hole automated installation script
+echo 'Beginne Pi-hole Installation...'
+
+# Create setupVars.conf
+echo 'Erstelle setupVars.conf für automatische Installation...'
+cat > /etc/pihole/setupVars.conf << 'EOF'
+$setupVarsContent
+EOF
+
+# Run the installer in automated mode
+echo 'Starte Pi-hole Installer...'
+curl -sSL https://install.pi-hole.net | PIHOLE_SKIP_OS_CHECK=true bash /dev/stdin --unattended
+
+# Set admin password
+pihole -a -p '$serverInfo[pihole_password]'
+
+echo 'Pi-hole Installation abgeschlossen!'
+echo 'Pi-hole Web Interface: http://localhost/admin'
+echo 'Pi-hole Admin Passwort: $serverInfo[pihole_password]'
+";
+
+    $installScriptPath = SCRIPT_DIR . '/install_pihole.sh';
+    file_put_contents($installScriptPath, $installScriptContent);
+    chmod($installScriptPath, 0755);
+
+    log_message("Pi-hole Installationsskript erstellt: " . BOLD . $installScriptPath . RESET, 'SUCCESS');
+    log_message("Um Pi-hole zu installieren, führen Sie dieses Skript aus:", 'INFO');
+    log_message(BOLD . "sudo " . $installScriptPath . RESET);
+    
+    echo PHP_EOL . CYAN . BOLD . "╔═══ PI-HOLE INSTALLATION ═══╗" . RESET . PHP_EOL;
+    log_message("Nach der Installation ist Pi-hole über das Web Interface erreichbar:");
+    log_message("URL: " . BOLD . "http://SERVER_IP/admin" . RESET);
+    log_message("Benutzername: " . BOLD . "admin" . RESET);
+    log_message("Passwort: " . BOLD . $serverInfo['pihole_password'] . RESET);
+    log_message("Pi-hole kann als DNS-Server (Server IP) in der VPN-Konfiguration verwendet werden");
+    log_message("um Werbung und Tracking für alle VPN-Nutzer zu blockieren.");
+    echo CYAN . BOLD . "╚════════════════════════════╝" . RESET . PHP_EOL;
+}
+
 // Setup cron job for update_server_load.php
 function setup_cron_job() {
     log_message("Richte geplante Aufgabe für update_server_load.php ein", 'STEP');
@@ -553,6 +677,7 @@ try {
     $serverInfo = collect_server_info();
     create_config_file($serverInfo);
     configure_network_components($serverInfo);
+    install_pihole($serverInfo);
     setup_cron_job();
 
     echo PHP_EOL;
