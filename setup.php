@@ -31,7 +31,7 @@ define('WHITE', "\033[37m");
 define('BOLD', "\033[1m");
 
 // Enable Windows console colors
-system('');  // This trick enables ANSI color codes in Windows 10+
+#system('');  // This trick enables ANSI color codes in Windows 10+
 
 // Create logs directory if it doesn't exist
 if (!is_dir(LOG_DIR)) {
@@ -194,6 +194,55 @@ function collect_server_info() {
     } else {
         $serverInfo['vpn_type'] = prompt("VPN-Typ auswählen", "wireguard", ["wireguard", "openvpn"]);
     }
+    
+    // Configure Wireguard port
+    if ($serverInfo['vpn_type'] === 'wireguard') {
+        if ($isUpdate && isset($existingConfig['wireguard_port'])) {
+            $serverInfo['wireguard_port'] = $existingConfig['wireguard_port'];
+            log_message("Verwende bestehenden Wireguard-Port: " . BOLD . $serverInfo['wireguard_port'] . RESET);
+        } else {
+            $serverInfo['wireguard_port'] = prompt("Port für Wireguard eingeben", "443");
+            log_message("Wireguard wird auf Port " . BOLD . $serverInfo['wireguard_port'] . RESET . " konfiguriert");
+        }
+    }
+
+    // Configure proxy settings
+    echo PHP_EOL . BOLD . MAGENTA . "╔═══ PROXY KONFIGURATION ═══╗" . RESET . PHP_EOL;
+    
+    if ($isUpdate && isset($existingConfig['use_proxy'])) {
+        $serverInfo['use_proxy'] = $existingConfig['use_proxy'];
+        log_message("Verwende bestehende Proxy-Einstellung: " . BOLD . ($serverInfo['use_proxy'] ? "Ja" : "Nein") . RESET);
+    } else {
+        $useProxy = prompt("Möchten Sie einen Proxy verwenden", "nein", ["ja", "nein"]);
+        $serverInfo['use_proxy'] = ($useProxy === 'ja');
+    }
+    
+    if ($serverInfo['use_proxy']) {
+        if ($isUpdate && isset($existingConfig['proxy_host'])) {
+            $serverInfo['proxy_host'] = $existingConfig['proxy_host'];
+            $serverInfo['proxy_port'] = $existingConfig['proxy_port'];
+            $serverInfo['proxy_type'] = $existingConfig['proxy_type'] ?? 'socks5';
+            $serverInfo['proxy_username'] = $existingConfig['proxy_username'] ?? '';
+            $serverInfo['proxy_password'] = $existingConfig['proxy_password'] ?? '';
+            log_message("Verwende bestehenden Proxy: " . BOLD . $serverInfo['proxy_host'] . ":" . $serverInfo['proxy_port'] . RESET);
+        } else {
+            $serverInfo['proxy_type'] = prompt("Proxy-Typ eingeben", "socks5", ["socks5", "socks4", "http"]);
+            $serverInfo['proxy_host'] = prompt("Proxy-Host eingeben");
+            $serverInfo['proxy_port'] = prompt("Proxy-Port eingeben", "1080");
+            
+            $useAuth = prompt("Benötigt der Proxy Authentifizierung", "nein", ["ja", "nein"]);
+            if ($useAuth === 'ja') {
+                $serverInfo['proxy_username'] = prompt("Proxy-Benutzername eingeben");
+                $serverInfo['proxy_password'] = prompt("Proxy-Passwort eingeben");
+            } else {
+                $serverInfo['proxy_username'] = '';
+                $serverInfo['proxy_password'] = '';
+            }
+            
+            log_message("Proxy wird konfiguriert: " . BOLD . $serverInfo['proxy_type'] . "://" . 
+                        $serverInfo['proxy_host'] . ":" . $serverInfo['proxy_port'] . RESET);
+        }
+    }
 
     echo PHP_EOL . BOLD . MAGENTA . "╔═══ DATENBANK KONFIGURATION ═══╗" . RESET . PHP_EOL;
     
@@ -226,6 +275,17 @@ function create_config_file($serverInfo) {
 
         // VPN type
         'vpn_type' => $serverInfo['vpn_type'],
+
+        // Wireguard port
+        'wireguard_port' => $serverInfo['wireguard_port'] ?? null,
+
+        // Proxy settings
+        'use_proxy' => $serverInfo['use_proxy'] ?? false,
+        'proxy_type' => $serverInfo['proxy_type'] ?? null,
+        'proxy_host' => $serverInfo['proxy_host'] ?? null,
+        'proxy_port' => $serverInfo['proxy_port'] ?? null,
+        'proxy_username' => $serverInfo['proxy_username'] ?? null,
+        'proxy_password' => $serverInfo['proxy_password'] ?? null,
 
         // Database connection details
         'db_host' => $serverInfo['db_host'],
@@ -265,6 +325,167 @@ function create_config_file($serverInfo) {
     file_put_contents(CONFIG_FILE, $configContent);
 
     log_message("Konfigurationsdatei erfolgreich erstellt: " . BOLD . CONFIG_FILE . RESET, 'SUCCESS');
+}
+
+// Configure Wireguard and redsocks if needed
+function configure_network_components($serverInfo) {
+    if ($serverInfo['vpn_type'] === 'wireguard') {
+        log_message("Konfiguriere Wireguard auf Port " . $serverInfo['wireguard_port'], 'STEP');
+        
+        // Check if wireguard is installed
+        show_progress("Prüfe Wireguard Installation");
+        
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            log_message("Windows-System erkannt. Bitte stellen Sie sicher, dass Wireguard installiert ist.", 'WARNING');
+            log_message("Für Windows muss die Wireguard-Konfiguration manuell angepasst werden.", 'WARNING');
+            
+            // Create a helper script for Windows
+            $wgConfigHelperPath = SCRIPT_DIR . '\\configure_wireguard_port.bat';
+            $wgConfigContent = "@echo off\n";
+            $wgConfigContent .= "echo Dieses Skript hilft bei der Konfiguration von Wireguard auf Port " . $serverInfo['wireguard_port'] . "\n";
+            $wgConfigContent .= "echo 1. Öffnen Sie die Wireguard-Konfiguration\n";
+            $wgConfigContent .= "echo 2. Ändern Sie den ListenPort auf " . $serverInfo['wireguard_port'] . "\n";
+            $wgConfigContent .= "echo 3. Speichern Sie die Änderungen und starten Sie den Wireguard-Dienst neu\n";
+            $wgConfigContent .= "echo.\n";
+            $wgConfigContent .= "echo Drücken Sie eine Taste, um die Wireguard-Benutzeroberfläche zu öffnen...\n";
+            $wgConfigContent .= "pause >nul\n";
+            $wgConfigContent .= "start \"\" \"C:\\Program Files\\WireGuard\\wireguard.exe\"\n";
+            
+            file_put_contents($wgConfigHelperPath, $wgConfigContent);
+            log_message("Hilfsskript erstellt: " . BOLD . $wgConfigHelperPath . RESET);
+            log_message("Führen Sie dieses Skript aus, um die Wireguard-Konfiguration anzupassen.");
+        } else {
+            // Linux system
+            $configPath = "/etc/wireguard/wg0.conf";
+            
+            if (!file_exists($configPath)) {
+                log_message("Wireguard-Konfigurationsdatei nicht gefunden: $configPath", 'ERROR');
+                log_message("Stellen Sie sicher, dass Wireguard installiert ist. Installation mit:", 'INFO');
+                log_message(BOLD . "apt update && apt install -y wireguard" . RESET);
+                return;
+            }
+            
+            show_progress("Ändere Wireguard-Port auf " . $serverInfo['wireguard_port']);
+            
+            // Create a backup
+            $backupPath = $configPath . ".bak";
+            copy($configPath, $backupPath);
+            
+            // Read current config
+            $wgConfig = file_get_contents($configPath);
+            
+            // Update ListenPort
+            $wgConfig = preg_replace('/ListenPort\s*=\s*\d+/', "ListenPort = " . $serverInfo['wireguard_port'], $wgConfig);
+            
+            // If ListenPort doesn't exist, add it to [Interface] section
+            if (!preg_match('/ListenPort\s*=/', $wgConfig)) {
+                $wgConfig = preg_replace('/(\[Interface\][^\[]*)/s', "$1ListenPort = " . $serverInfo['wireguard_port'] . "\n", $wgConfig);
+            }
+            
+            // Write updated config
+            file_put_contents($configPath, $wgConfig);
+            
+            log_message("Wireguard-Konfiguration aktualisiert. Port auf " . BOLD . $serverInfo['wireguard_port'] . RESET . " gesetzt.", 'SUCCESS');
+            log_message("Wireguard neu starten mit: " . BOLD . "systemctl restart wg-quick@wg0" . RESET);
+            
+            // Open firewall port
+            show_progress("Konfiguriere Firewall für Port " . $serverInfo['wireguard_port']);
+            
+            log_message("Um die Firewall zu konfigurieren, führen Sie diese Befehle aus:", 'INFO');
+            log_message(BOLD . "ufw allow " . $serverInfo['wireguard_port'] . "/udp" . RESET);
+            log_message(BOLD . "ufw reload" . RESET);
+        }
+    }
+    
+    // Configure redsocks for proxy if needed
+    if ($serverInfo['use_proxy']) {
+        log_message("Konfiguriere Proxy mit redsocks", 'STEP');
+        
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            log_message("Redsocks wird unter Windows nicht unterstützt.", 'WARNING');
+            log_message("Windows-Benutzer müssen einen anderen Proxy-Client verwenden.", 'WARNING');
+        } else {
+            // Linux system
+            show_progress("Prüfe redsocks Installation");
+            
+            // Check if redsocks is installed
+            $redsocksInstalled = shell_exec("which redsocks 2>/dev/null");
+            if (empty($redsocksInstalled)) {
+                log_message("redsocks nicht gefunden. Installation mit:", 'INFO');
+                log_message(BOLD . "apt update && apt install -y redsocks" . RESET);
+            }
+            
+            // Create redsocks configuration
+            show_progress("Erstelle redsocks Konfiguration");
+            
+            $redsocksConfigPath = "/etc/redsocks.conf";
+            $redsocksConfig = "base {
+    log_debug = off;
+    log_info = on;
+    log = \"file:/var/log/redsocks.log\";
+    daemon = on;
+    redirector = iptables;
+}
+
+redsocks {
+    local_ip = 0.0.0.0;
+    local_port = 12345;
+    
+    ip = " . $serverInfo['proxy_host'] . ";
+    port = " . $serverInfo['proxy_port'] . ";
+    
+    type = " . $serverInfo['proxy_type'] . ";
+";
+
+            // Add authentication if needed
+            if (!empty($serverInfo['proxy_username']) && !empty($serverInfo['proxy_password'])) {
+                $redsocksConfig .= "    login = \"" . $serverInfo['proxy_username'] . "\";\n";
+                $redsocksConfig .= "    password = \"" . $serverInfo['proxy_password'] . "\";\n";
+            }
+            
+            $redsocksConfig .= "}\n";
+            
+            log_message("Um redsocks zu konfigurieren, führen Sie diese Befehle aus:", 'INFO');
+            log_message(BOLD . "sudo bash -c 'cat > $redsocksConfigPath << \"EOF\"\n$redsocksConfig\nEOF'" . RESET);
+            log_message(BOLD . "systemctl enable redsocks" . RESET);
+            log_message(BOLD . "systemctl restart redsocks" . RESET);
+            
+            // Create iptables rules to redirect traffic through proxy
+            show_progress("Erstelle iptables Regeln für Proxy-Umleitung");
+            
+            $iptablesScript = "#!/bin/bash
+
+# Redsocks iptables script
+
+# Create new chain
+iptables -t nat -N REDSOCKS
+
+# Ignore LANs and redsocks itself
+iptables -t nat -A REDSOCKS -d 0.0.0.0/8 -j RETURN
+iptables -t nat -A REDSOCKS -d 10.0.0.0/8 -j RETURN
+iptables -t nat -A REDSOCKS -d 127.0.0.0/8 -j RETURN
+iptables -t nat -A REDSOCKS -d 169.254.0.0/16 -j RETURN
+iptables -t nat -A REDSOCKS -d 172.16.0.0/12 -j RETURN
+iptables -t nat -A REDSOCKS -d 192.168.0.0/16 -j RETURN
+iptables -t nat -A REDSOCKS -d 224.0.0.0/4 -j RETURN
+iptables -t nat -A REDSOCKS -d 240.0.0.0/4 -j RETURN
+
+# Redirect TCP traffic to redsocks
+iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-port 12345
+
+# Apply REDSOCKS chain to VPN traffic
+iptables -t nat -A PREROUTING -i wg0 -p tcp -j REDSOCKS
+";
+            $iptablesScriptPath = SCRIPT_DIR . '/redsocks_iptables.sh';
+            file_put_contents($iptablesScriptPath, $iptablesScript);
+            chmod($iptablesScriptPath, 0755);
+            
+            log_message("Iptables-Skript erstellt: " . BOLD . $iptablesScriptPath . RESET, 'SUCCESS');
+            log_message("Führen Sie dieses Skript aus, um den Traffic durch den Proxy zu leiten:", 'INFO');
+            log_message(BOLD . "sudo " . $iptablesScriptPath . RESET);
+            log_message("Um die Regeln beim Systemstart zu laden, fügen Sie dies in /etc/rc.local ein.", 'INFO');
+        }
+    }
 }
 
 // Setup cron job for update_server_load.php
@@ -331,6 +552,7 @@ try {
     
     $serverInfo = collect_server_info();
     create_config_file($serverInfo);
+    configure_network_components($serverInfo);
     setup_cron_job();
 
     echo PHP_EOL;

@@ -168,6 +168,9 @@ Angenommen dein externes Interface heißt `eth0` und das WireGuard‑Interface a
 # Dauerhaft eintragen
 sudo sed -i 's/^#*\s*net.ipv4.ip_forward=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
 sudo sysctl -p
+
+sudo sed -i 's/^#\?net.ipv6.conf.all.forwarding=.*/net.ipv6.conf.all.forwarding=1/' /etc/sysctl.conf
+sudo sysctl -p
 ```
 
 ### 2. NAT/Masquerade-Regel setzen
@@ -189,6 +192,14 @@ sudo sysctl -p
    -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
    COMMIT
    ```
+  Bearbeite `/etc/ufw/before6.rules` **ganz oben** vor `*filter` und füge ein:
+   ```text
+    *nat
+    :POSTROUTING ACCEPT [0:0]
+    -A POSTROUTING -s fd00:dead:beef::/64 -o eth0 -j MASQUERADE
+    COMMIT
+    ```
+   
 3. **UFW neu laden**  
    ```bash
    sudo ufw reload
